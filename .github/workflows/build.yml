@@ -54,14 +54,16 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       # Use the Node.js version that this Outline version is developed with.
+      # setup-node resolves node-version-file against the workspace, so the
+      # file is fetched into it.
       - name: Fetch Outline's .nvmrc
         run: >
-          curl -fsSL -o "$RUNNER_TEMP/.nvmrc"
+          curl -fsSL -o outline.nvmrc
           "https://raw.githubusercontent.com/outline/outline/v${{ steps.version.outputs.version }}/.nvmrc"
 
       - uses: actions/setup-node@v7
         with:
-          node-version-file: ${{ runner.temp }}/.nvmrc
+          node-version-file: outline.nvmrc
 
       # Outline pins its Yarn version through corepack, which recent Node.js
       # releases no longer bundle.
