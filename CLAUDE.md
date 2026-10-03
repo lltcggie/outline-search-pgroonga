@@ -49,4 +49,4 @@ Outline（Wiki）v1.10.1 用の検索プロバイダープラグイン。PGroong
 ## SQL
 
 - `sql/install.sql`: `CREATE INDEX CONCURRENTLY` を使うのでトランザクション内で実行できない（`--single-transaction` 不可）。トークナイザーは全文字種バイグラムの `TokenNgram`、ノーマライザーは `NormalizerNFKC150`（`pgroonga_condition` と合わせて PGroonga 3.1.6 以上が必要）。
-- 動作確認済みの環境は PostgreSQL 16 + PGroonga 3.1.8。
+- テストが通ることを確認済みの環境は PostgreSQL 16 + PGroonga 3.1.8 と PostgreSQL 18 + PGroonga 4.0.9。
