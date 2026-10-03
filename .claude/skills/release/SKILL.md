@@ -59,7 +59,7 @@ scratchpad に `git clone --filter=blob:none https://github.com/outline/outline.
 
 ## 4. 公開する
 
-1. main を push し、そのコミットの CI が成功するのを待つ（`gh run list --commit <SHA> --workflow build.yml` → `gh run watch <ID> --exit-status`）。push するものが無いときは、`origin/main` の HEAD の CI が成功済みであることを確かめる。
+1. main を push し、そのコミットの CI が成功するのを待つ（`gh run list --commit (git rev-parse HEAD) --workflow build.yml` → `gh run watch <ID> --exit-status`。短縮 SHA では見つからない）。push するものが無いときは、`origin/main` の HEAD の CI が成功済みであることを確かめる。
 2. `git tag <タグ>` → `git push origin <タグ>`。
 3. 数秒おいて `gh run list --branch <タグ> --limit 1` で ID を取り、`gh run watch <ID> --exit-status` で待つ。
 4. `gh release view <タグ> --json url,isDraft,assets` で、下書きでないこと、`search-pgroonga-outline-<版>.tar.gz` と `.sha256` の 2 つが添付されていることを確かめる。
