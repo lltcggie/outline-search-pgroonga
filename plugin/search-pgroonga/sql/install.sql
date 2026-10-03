@@ -5,6 +5,9 @@
 --
 -- CREATE INDEX CONCURRENTLY cannot run inside a transaction block, so do not
 -- pass --single-transaction. Building the index does not block writes.
+--
+-- If a build is interrupted it leaves an invalid index behind, which IF NOT
+-- EXISTS below would keep. Run uninstall.sql first, then this file again.
 
 CREATE EXTENSION IF NOT EXISTS pgroonga;
 

@@ -109,7 +109,6 @@ docker compose up -d outline
 ## 標準の検索との違い・制限
 
 - **英語は語幹一致ではなく部分一致になります。** `postgre` で `PostgreSQL` が見つかる一方、`art` で `start` も見つかり、`run` で `ran` は見つかりません。
-- 1 回の検索で扱う一致文書は、スコア上位 10,000 件までです（`maxMatches`）。
 - 過去のタイトルは 1 文書につき 20 個まで検索対象です。
 - 全角/半角の違いだけで一致した場合、結果の抜粋に太字のハイライトが付きません（検索自体は当たります）。
 - ひらがなとカタカナは区別します。同一視したい場合は `install.sql` 内のコメントを参照してください。
@@ -144,7 +143,7 @@ Release を待たずに自分でコンパイルすることもできます（git
    git diff v1.10.1 v1.11.0 -- plugins/search-postgres server/utils/BaseSearchProvider.ts
    ```
 
-   特に `searchForTeam` 内の「Kept in step with…」ブロック、`buildPGroongaFindOptions`、`buildSnippet`、`PGroongaSearchProvider.parity.test.ts` を差分に合わせて直します。
+   特に `searchForTeam` 内の「Kept in step with…」ブロック、`buildRankedOrder`、`buildSnippet`、`PGroongaSearchProvider.parity.test.ts` を差分に合わせて直します。
 3. **テストする**: 新しいバージョンの Outline のソースの `plugins/` にこのプラグインをコピーし、PGroonga を入れたテスト用 DB で Outline のテスト（vitest）を実行します。
 4. **バージョンを上げる**: `OUTLINE_VERSION` を新しいバージョンにし、`LICENSE` をそのバージョンの Outline のものに差し替え、`NOTICE` のバージョンと Change Date を合わせます。README 中のバージョン表記も更新します。
 5. **リリースする**: コミットして push し、`outline-<バージョン>` のタグを push すると、Actions がビルドして Release を作ります。

@@ -2,12 +2,10 @@ import invariant from "invariant";
 import { compact, escapeRegExp, find, map } from "es-toolkit/compat";
 import type {
   BindOrReplacements,
-  FindAttributeOptions,
-  FindOptions,
-  Order,
+  Transaction,
   WhereOptions,
 } from "sequelize";
-import { Op, QueryTypes, Sequelize } from "sequelize";
+import { Op, QueryTypes } from "sequelize";
 import { DirectionFilter, SortFilter } from "@shared/types";
 import { regexIndexOf, regexLastIndexOf } from "@shared/utils/string";
 import Collection from "@server/models/Collection";
@@ -22,16 +20,21 @@ import type {
 } from "@server/utils/BaseSearchProvider";
 import PostgresSearchProvider from "../../search-postgres/server/PostgresSearchProvider";
 
-type RankedDocument = Document & {
-  id: string;
-  dataValues: Partial<Document> & {
-    searchRanking: number;
-  };
-};
-
 type ScopedWhere = WhereOptions<Document> & {
   [Op.and]: WhereOptions<Document>[];
 };
+
+/**
+ * The part of Sequelize's query generator used to write a `where` as SQL.
+ * Sequelize types the generator as unknown, so this is not type-checked.
+ */
+interface WhereQueryGenerator {
+  getWhereConditions(
+    where: WhereOptions<Document>,
+    tableName: string,
+    model: typeof Document
+  ): string;
+}
 
 interface ParsedQuery {
   /** The query in Groonga query syntax, or undefined if there are no terms. */
@@ -75,12 +78,6 @@ export default class PGroongaSearchProvider extends PostgresSearchProvider {
   public static maxPreviousTitles = 20;
 
   /**
-   * The most matching documents considered for a single search, best scoring
-   * first. Only reached by terms that appear in more than this many documents.
-   */
-  public static maxMatches = 10000;
-
-  /**
    * The indexed expression: [title, body, ...previous titles]. This must be
    * written exactly as in sql/install.sql, PostgreSQL only uses an expression
    * index when the query repeats the expression it was built from.
@@ -88,39 +85,51 @@ export default class PGroongaSearchProvider extends PostgresSearchProvider {
   private static readonly INDEXED_SQL = `ARRAY[title::text, text] || COALESCE("previousTitles", '{}')::text[]`;
 
   /**
-   * Finds matching documents and their scores using only the PGroonga index.
+   * Finds every matching document of the team and its score using only the
+   * PGroonga index, as a CTE that the ranked and count queries start with.
    *
-   * This runs as its own statement, rather than as one more condition on the
-   * main query, because PGroonga only computes a score (and only guarantees
-   * its full-text semantics) when the row is found through its index. Combined
-   * with the permission conditions, PostgreSQL is free to locate rows through
-   * some other index and merely re-check the text condition, which would
-   * silently zero the ranking. Here the index is the only way in:
+   * PGroonga only computes a score (and only guarantees its full-text
+   * semantics) when the row is found through its index. Were the text
+   * condition one more condition next to the permission conditions,
+   * PostgreSQL would be free to locate rows through some other index and
+   * merely re-check the text, which silently zeroes the ranking. Here the
+   * index is the only way in:
    *
-   * - the text condition is the only indexable one, teamId is compared as text
-   *   so that no b-tree index applies to it.
-   * - sequential scans are disabled for the transaction by the caller.
+   * - MATERIALIZED keeps the CTE a plan of its own, no condition of the outer
+   *   query is pushed into it.
+   * - inside it the text condition is the only indexable one, teamId is
+   *   compared as text so that no b-tree index applies to it.
+   * - sequential scans are disabled for the transaction, see
+   *   withMatchSettings.
+   *
+   * The outer query is then free to filter the matches by permissions and
+   * filters in any way it likes, the scores are already computed.
    */
-  private static readonly MATCH_SQL = `
-    SELECT id, pgroonga_score(tableoid, ctid) AS score
-    FROM documents
-    WHERE ${PGroongaSearchProvider.INDEXED_SQL} &@~ pgroonga_condition(
-        :query,
-        weights => ARRAY[${[
-          PGroongaSearchProvider.titleWeight,
-          PGroongaSearchProvider.bodyWeight,
-          ...Array<number>(PGroongaSearchProvider.maxPreviousTitles).fill(
-            PGroongaSearchProvider.previousTitleWeight
-          ),
-        ].join(", ")}],
-        index_name => '${PGroongaSearchProvider.indexName}'
-      )
-      AND "teamId"::text = :teamId
-    ORDER BY score DESC
-    LIMIT :limit`;
+  private static readonly MATCHES_CTE = `
+    WITH matches AS MATERIALIZED (
+      SELECT id AS "matchId", pgroonga_score(tableoid, ctid) AS "matchScore"
+      FROM documents
+      WHERE ${PGroongaSearchProvider.INDEXED_SQL} &@~ pgroonga_condition(
+          :query,
+          weights => ARRAY[${[
+            PGroongaSearchProvider.titleWeight,
+            PGroongaSearchProvider.bodyWeight,
+            ...Array<number>(PGroongaSearchProvider.maxPreviousTitles).fill(
+              PGroongaSearchProvider.previousTitleWeight
+            ),
+          ].join(", ")}],
+          index_name => '${PGroongaSearchProvider.indexName}'
+        )
+        AND "teamId"::text = :teamId
+    )`;
 
-  /** Looks up the score of the current row in the :scores replacement. */
-  private static readonly SCORE_SQL = `(CAST(:scores AS jsonb) ->> "id"::text)::float8`;
+  /**
+   * Joins the matches to the documents, aliased "Document" as in findAll, so
+   * that a `where` written by Sequelize's query generator applies unchanged.
+   */
+  private static readonly FROM_MATCHES_SQL = `
+    FROM documents AS "Document"
+    JOIN matches ON matches."matchId" = "Document"."id"`;
 
   /** Whether the index has been confirmed to exist, checked on first use. */
   private static indexVerified = false;
@@ -231,7 +240,7 @@ export default class PGroongaSearchProvider extends PostgresSearchProvider {
     teamId,
     where,
     options,
-    usePopularityBoost,
+    usePopularityBoost = true,
     loadDocuments,
   }: {
     teamId: string;
@@ -242,41 +251,66 @@ export default class PGroongaSearchProvider extends PostgresSearchProvider {
   }): Promise<SearchResponse> {
     const { limit = 15, offset = 0 } = options;
     const parsed = PGroongaSearchProvider.parseQuery(options.query);
-    let scores: Map<string, number> | undefined;
 
-    if (parsed.groonga) {
-      scores = await PGroongaSearchProvider.findMatches(teamId, parsed.groonga);
+    // Without a query there is nothing to match or rank, list the documents
+    // exactly as the built-in provider does.
+    if (!parsed.groonga) {
+      const findOptions = PostgresSearchProvider["buildFindOptions"]({
+        sort: options.sort,
+        direction: options.direction,
+      });
+      const results = await PostgresSearchProvider["findRankedResults"]({
+        findOptions,
+        where,
+        limit,
+        offset,
+      });
+      const [documents, count] = await Promise.all([
+        loadDocuments(map(results, "id")),
+        PostgresSearchProvider["countResults"]({
+          results,
+          limit,
+          offset,
+          replacements: findOptions.replacements,
+          where,
+        }),
+      ]);
 
-      if (scores.size === 0) {
-        return { results: [], total: 0 };
-      }
-
-      where[Op.and].push({ id: Array.from(scores.keys()) });
+      return PostgresSearchProvider["buildResponse"]({
+        results,
+        documents,
+        count,
+      });
     }
 
-    const findOptions = PGroongaSearchProvider.buildPGroongaFindOptions({
-      scores,
-      sort: options.sort,
-      direction: options.direction,
-      usePopularityBoost,
-    });
+    const replacements = { query: parsed.groonga, teamId };
 
-    const results = (await PostgresSearchProvider["findRankedResults"]({
-      findOptions,
-      where,
-      limit,
-      offset,
-    })) as RankedDocument[];
+    const results = await PGroongaSearchProvider.queryMatches<{
+      id: string;
+      searchRanking: number;
+    }>(
+      PGroongaSearchProvider.buildRankedSql({
+        where,
+        sort: options.sort,
+        direction: options.direction,
+        usePopularityBoost,
+      }),
+      { ...replacements, limit, offset }
+    );
 
     const [documents, count] = await Promise.all([
       loadDocuments(map(results, "id")),
-      PostgresSearchProvider["countResults"]({
-        results,
-        limit,
-        offset,
-        replacements: findOptions.replacements,
-        where,
-      }),
+      // Same shortcut as the built-in countResults: a page that was not filled
+      // tells the total without counting.
+      results.length < limit && (offset === 0 || results.length > 0)
+        ? offset + results.length
+        : PGroongaSearchProvider.queryMatches<{ count: string }>(
+            PGroongaSearchProvider.buildMatchesSql({
+              select: `SELECT COUNT(*) AS count`,
+              where,
+            }),
+            replacements
+          ).then(([row]) => Number(row.count)),
     ]);
 
     return {
@@ -293,10 +327,8 @@ export default class PGroongaSearchProvider extends PostgresSearchProvider {
           }
 
           return {
-            ranking: result.dataValues.searchRanking,
-            context: scores
-              ? PGroongaSearchProvider.buildSnippet(document, parsed)
-              : undefined,
+            ranking: Number(result.searchRanking),
+            context: PGroongaSearchProvider.buildSnippet(document, parsed),
             document,
           };
         })
@@ -306,39 +338,116 @@ export default class PGroongaSearchProvider extends PostgresSearchProvider {
   }
 
   /**
-   * Runs the full-text match against the PGroonga index.
+   * Builds a query over the documents matching the full-text query, see
+   * MATCHES_CTE, narrowed by `where`. It takes the replacements query and
+   * teamId, plus any used in `tail`.
    *
-   * @param teamId - the team to search within.
-   * @param query - the query in Groonga query syntax.
-   * @returns a map of matching document id to relevance score.
+   * @param select - the SELECT clause.
+   * @param where - the permission-scoped conditions, as passed to findAll.
+   * @param tail - ORDER BY, LIMIT and so on.
+   * @returns the SQL.
    */
-  private static async findMatches(
-    teamId: string,
-    query: string
-  ): Promise<Map<string, number>> {
-    await PGroongaSearchProvider.verifyIndex();
+  private static buildMatchesSql({
+    select,
+    where,
+    tail = "",
+  }: {
+    select: string;
+    where: WhereOptions<Document>;
+    tail?: string;
+  }): string {
+    // Written exactly as findAll writes the WHERE of "Document".
+    const generator = sequelizeReadOnly.getQueryInterface()
+      .queryGenerator as WhereQueryGenerator;
+    const conditions = generator.getWhereConditions(
+      where,
+      "Document",
+      Document
+    );
 
-    const rows = await sequelizeReadOnly.transaction(async (transaction) => {
-      // See MATCH_SQL. Scoped to this transaction only.
+    return [
+      PGroongaSearchProvider.MATCHES_CTE,
+      select,
+      PGroongaSearchProvider.FROM_MATCHES_SQL,
+      conditions ? `WHERE ${conditions}` : "",
+      tail,
+    ].join("\n");
+  }
+
+  /**
+   * Builds the ranked, paginated query of a search with a query. It takes the
+   * replacements query, teamId, limit and offset.
+   *
+   * @param where - the permission-scoped conditions, as passed to findAll.
+   * @param sort - the requested sort, if any.
+   * @param direction - the requested direction, if any.
+   * @param usePopularityBoost - whether popular documents rank higher.
+   * @returns the SQL, selecting id and searchRanking.
+   */
+  private static buildRankedSql({
+    where,
+    sort,
+    direction,
+    usePopularityBoost,
+  }: {
+    where: WhereOptions<Document>;
+    sort?: SortFilter;
+    direction?: DirectionFilter;
+    usePopularityBoost: boolean;
+  }): string {
+    const rank = usePopularityBoost
+      ? `matches."matchScore" * (1 + 0.25 * LN(1 + COALESCE("Document"."popularityScore", 0)))`
+      : `matches."matchScore"`;
+
+    return PGroongaSearchProvider.buildMatchesSql({
+      select: `SELECT "Document"."id", ${rank} AS "searchRanking"`,
+      where,
+      tail: `ORDER BY ${PGroongaSearchProvider.buildRankedOrder(
+        sort,
+        direction
+      )} LIMIT :limit OFFSET :offset`,
+    });
+  }
+
+  /**
+   * Runs `fn` in a read-only transaction set up for the queries built by
+   * buildMatchesSql: sequential scans are disabled, see MATCHES_CTE.
+   *
+   * @param fn - runs the queries in the transaction.
+   * @returns what `fn` returns.
+   */
+  private static withMatchSettings<T>(
+    fn: (transaction: Transaction) => Promise<T>
+  ): Promise<T> {
+    return sequelizeReadOnly.transaction(async (transaction) => {
+      // Scoped to this transaction only.
       await sequelizeReadOnly.query("SET LOCAL enable_seqscan = off", {
         transaction,
       });
-
-      return sequelizeReadOnly.query<{ id: string; score: number }>(
-        PGroongaSearchProvider.MATCH_SQL,
-        {
-          replacements: {
-            query,
-            teamId,
-            limit: PGroongaSearchProvider.maxMatches,
-          },
-          type: QueryTypes.SELECT,
-          transaction,
-        }
-      );
+      return fn(transaction);
     });
+  }
 
-    return new Map(rows.map((row) => [row.id, Number(row.score)]));
+  /**
+   * Runs a query built by buildMatchesSql.
+   *
+   * @param sql - the query.
+   * @param replacements - its replacements.
+   * @returns the rows.
+   */
+  private static async queryMatches<T extends object>(
+    sql: string,
+    replacements: BindOrReplacements
+  ): Promise<T[]> {
+    await PGroongaSearchProvider.verifyIndex();
+
+    return PGroongaSearchProvider.withMatchSettings((transaction) =>
+      sequelizeReadOnly.query<T>(sql, {
+        replacements,
+        type: QueryTypes.SELECT,
+        transaction,
+      })
+    );
   }
 
   /**
@@ -362,7 +471,7 @@ export default class PGroongaSearchProvider extends PostgresSearchProvider {
 
     if (!rows.length) {
       throw new Error(
-        `SEARCH_PROVIDER is "pgroonga" but the index "${this.indexName}" does not exist or is invalid. Run sql/install.sql from the search-pgroonga plugin against the database.`
+        `SEARCH_PROVIDER is "pgroonga" but the index "${this.indexName}" does not exist or is invalid. Run sql/install.sql from the search-pgroonga plugin against the database. If install.sql is still running, wait for it to finish; if it was interrupted, run sql/uninstall.sql and then install.sql again.`
       );
     }
     this.indexVerified = true;
@@ -422,6 +531,15 @@ export default class PGroongaSearchProvider extends PostgresSearchProvider {
       }
     }
 
+    // A query of nothing but OR is a search for the word itself.
+    if (tokens.length && tokens.every((t) => t.type === "or")) {
+      tokens.splice(0, tokens.length, {
+        type: "term",
+        text: "OR",
+        negative: false,
+      });
+    }
+
     // Groonga cannot evaluate a query made only of exclusions, in that case
     // search for the words themselves.
     const hasPositive = tokens.some((t) => t.type === "term" && !t.negative);
@@ -454,56 +572,43 @@ export default class PGroongaSearchProvider extends PostgresSearchProvider {
     };
   }
 
-  private static buildPGroongaFindOptions({
-    scores,
-    sort,
-    direction,
-    usePopularityBoost = true,
-  }: {
-    scores?: Map<string, number>;
-    sort?: SortFilter;
-    direction?: DirectionFilter;
-    usePopularityBoost?: boolean;
-  }): FindOptions {
-    const attributes: FindAttributeOptions = ["id"];
-    const replacements: BindOrReplacements = {};
-    const order: Order = [];
-    const hasQuery = !!scores;
-
-    if (scores) {
-      const rankExpression = usePopularityBoost
-        ? `${PGroongaSearchProvider.SCORE_SQL} * (1 + 0.25 * LN(1 + COALESCE("popularityScore", 0)))`
-        : PGroongaSearchProvider.SCORE_SQL;
-
-      attributes.push([Sequelize.literal(rankExpression), "searchRanking"]);
-      replacements["scores"] = JSON.stringify(Object.fromEntries(scores));
-    }
-
+  /**
+   * The ORDER BY of a search with a query, as the built-in buildFindOptions
+   * orders one.
+   *
+   * @param sort - the requested sort, if any.
+   * @param direction - the requested direction, if any.
+   * @returns the ORDER BY expressions.
+   */
+  private static buildRankedOrder(
+    sort?: SortFilter,
+    direction?: DirectionFilter
+  ): string {
     // When searching with a query and no explicit sort, prioritize search
     // ranking as the primary sort criterion. Otherwise, use the specified sort
     // with ranking as a tiebreaker.
-    if (hasQuery && !sort) {
-      order.push(["searchRanking", "DESC"]);
-      order.push([SortFilter.UpdatedAt, DirectionFilter.DESC]);
-    } else {
-      const sortField = sort ?? SortFilter.UpdatedAt;
-      const sortDirection = direction ?? DirectionFilter.DESC;
-
-      if (sortField === SortFilter.Title) {
-        order.push([
-          Sequelize.fn("LOWER", Sequelize.col("title")),
-          sortDirection,
-        ]);
-      } else {
-        order.push([sortField, sortDirection]);
-      }
-
-      if (hasQuery) {
-        order.push(["searchRanking", "DESC"]);
-      }
+    if (!sort) {
+      return `"searchRanking" DESC, "Document"."updatedAt" DESC`;
     }
 
-    return { attributes, replacements, order };
+    const sortDirection = direction ?? DirectionFilter.DESC;
+
+    // Both are written into the SQL, so only known values get through.
+    invariant(
+      Object.values(SortFilter).includes(sort),
+      `Invalid sort: ${sort}`
+    );
+    invariant(
+      Object.values(DirectionFilter).includes(sortDirection),
+      `Invalid direction: ${sortDirection}`
+    );
+
+    const sortExpression =
+      sort === SortFilter.Title
+        ? `LOWER("Document"."title")`
+        : `"Document"."${sort}"`;
+
+    return `${sortExpression} ${sortDirection}, "searchRanking" DESC`;
   }
 
   /**

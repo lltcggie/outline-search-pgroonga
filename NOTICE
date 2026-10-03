@@ -17,7 +17,7 @@ Portions derived from Outline:
 - plugin/search-pgroonga/server/PGroongaSearchProvider.ts
     extends PostgresSearchProvider from plugins/search-postgres. The block
     marked "Kept in step with PostgresSearchProvider.searchForTeam" is copied
-    from it, and buildPGroongaFindOptions and buildSnippet are adapted from its
+    from it, and buildRankedOrder and buildSnippet are adapted from its
     buildFindOptions and snippet logic.
 - plugin/search-pgroonga/server/PGroongaSearchProvider.parity.test.ts
     ported from plugins/search-postgres/server/PostgresSearchProvider.test.ts.

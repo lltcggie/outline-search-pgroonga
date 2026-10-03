@@ -1,12 +1,28 @@
+import { QueryTypes } from "sequelize";
+import { DirectionFilter, SortFilter } from "@shared/types";
+import { sequelizeReadOnly } from "@server/storage/database";
 import {
   buildCollection,
   buildDocument,
   buildTeam,
   buildUser,
 } from "@server/test/factories";
+import PostgresSearchProvider from "../../search-postgres/server/PostgresSearchProvider";
 import PGroongaSearchProvider from "./PGroongaSearchProvider";
 
 const provider = new PGroongaSearchProvider();
+
+/** A node of EXPLAIN (FORMAT JSON) output, only the fields used here. */
+interface PlanNode {
+  "Node Type": string;
+  "Subplan Name"?: string;
+  "Index Name"?: string;
+  Plans?: PlanNode[];
+}
+
+function flattenPlan(node: PlanNode): PlanNode[] {
+  return [node, ...(node.Plans ?? []).flatMap(flattenPlan)];
+}
 
 async function setup(
   docs: { title: string; text?: string; previousTitles?: string[] }[]
@@ -83,6 +99,7 @@ describe("PGroongaSearchProvider", () => {
         { title: "福岡", text: "旅行の記録" },
       ]);
       expect((await search("出張 -東京")).sort()).toEqual(["大阪"]);
+      expect((await search("-東京 出張")).sort()).toEqual(["大阪"]);
       expect((await search("東京 OR 福岡")).sort()).toEqual(
         ["東京", "福岡"].sort()
       );
@@ -108,6 +125,44 @@ describe("PGroongaSearchProvider", () => {
       expect(results.length).toBe(1);
       expect(results[0].ranking).toBeGreaterThan(0);
       expect(results[0].context).toContain("<b>検索語</b>");
+    });
+
+    it("should keep the ranking when filtered and sorted", async () => {
+      const { user, collection } = await setup([
+        { title: "障害対応", text: "手順" },
+        { title: "雑記", text: "障害対応の話を少し" },
+      ]);
+      // Filters and sorting are applied outside the PGroonga match and must not
+      // zero the scores. With a database this small the planner may not try
+      // another index anyway, so this checks the result rather than the plan.
+      const filter = {
+        field: "collectionId",
+        operator: "eq",
+        value: collection.id,
+      } as const;
+
+      const ranked = await provider.searchForUser(user, {
+        query: "障害対応",
+        filter,
+      });
+      expect(ranked.results.map((r) => r.document.title)).toEqual([
+        "障害対応",
+        "雑記",
+      ]);
+      expect(ranked.results[0].ranking).toBeGreaterThan(
+        ranked.results[1].ranking ?? 0
+      );
+
+      const sorted = await provider.searchForUser(user, {
+        query: "障害対応",
+        filter,
+        sort: SortFilter.Title,
+        direction: DirectionFilter.ASC,
+      });
+      expect(sorted.total).toBe(2);
+      for (const result of sorted.results) {
+        expect(result.ranking).toBeGreaterThan(0);
+      }
     });
 
     it("should find a document by a previous title", async () => {
@@ -172,6 +227,70 @@ describe("PGroongaSearchProvider", () => {
     });
   });
 
+  describe("query plan", () => {
+    it("should find the matches through the PGroonga index only", async () => {
+      const { user, collection } = await setup([
+        { title: "障害対応", text: "手順" },
+      ]);
+      // The where of a real search, with a collection filter that a b-tree
+      // index could serve.
+      const where = await PostgresSearchProvider["buildWhere"](user, {
+        filter: { field: "collectionId", operator: "eq", value: collection.id },
+      });
+      const sql = PGroongaSearchProvider["buildRankedSql"]({
+        where,
+        sort: SortFilter.UpdatedAt,
+        direction: DirectionFilter.DESC,
+        usePopularityBoost: true,
+      });
+
+      // Planned with the same settings as a search runs with.
+      const [row] = await PGroongaSearchProvider["withMatchSettings"](
+        (transaction) =>
+          sequelizeReadOnly.query<{ "QUERY PLAN": unknown }>(
+            `EXPLAIN (FORMAT JSON) ${sql}`,
+            {
+              replacements: {
+                query: PGroongaSearchProvider.parseQuery("障害対応").groonga,
+                teamId: user.teamId,
+                limit: 15,
+                offset: 0,
+              },
+              type: QueryTypes.SELECT,
+              transaction,
+            }
+          )
+      );
+      const output = row["QUERY PLAN"];
+      const [{ Plan }] = (
+        typeof output === "string" ? JSON.parse(output) : output
+      ) as { Plan: PlanNode }[];
+
+      // MATERIALIZED keeps the CTE a plan of its own…
+      const cte = flattenPlan(Plan).find(
+        (node) => node["Subplan Name"] === "CTE matches"
+      );
+      expect(cte).toBeDefined();
+      const cteNodes = cte ? flattenPlan(cte) : [];
+
+      // …that reaches the documents through the PGroonga index and nothing
+      // else…
+      expect(cteNodes.map((node) => node["Node Type"])).not.toContain(
+        "Seq Scan"
+      );
+      const indexNames = cteNodes.flatMap((node) =>
+        node["Index Name"] ? [node["Index Name"]] : []
+      );
+      expect(indexNames.length).toBeGreaterThan(0);
+      expect(new Set(indexNames)).toEqual(
+        new Set([PGroongaSearchProvider.indexName])
+      );
+
+      // …and into which no condition of the outer query is pushed.
+      expect(JSON.stringify(cte)).not.toContain("collectionId");
+    });
+  });
+
   describe("parseQuery", () => {
     it("should quote and escape every term", () => {
       expect(PGroongaSearchProvider.parseQuery("検索 テスト").groonga).toBe(
@@ -184,6 +303,7 @@ describe("PGroongaSearchProvider", () => {
         '"a" OR "b" -"c"'
       );
       expect(PGroongaSearchProvider.parseQuery("OR a OR").groonga).toBe('"a"');
+      expect(PGroongaSearchProvider.parseQuery("OR").groonga).toBe('"OR"');
       expect(PGroongaSearchProvider.parseQuery('  ""  ').groonga).toBeUndefined();
       expect(PGroongaSearchProvider.parseQuery(undefined).groonga).toBeUndefined();
     });
