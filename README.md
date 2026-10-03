@@ -144,7 +144,7 @@ Release を待たずに自分でコンパイルすることもできます（git
    ```
 
    特に `searchForTeam` 内の「Kept in step with…」ブロック、`buildRankedOrder`、`buildSnippet`、`PGroongaSearchProvider.parity.test.ts` を差分に合わせて直します。
-3. **テストする**: 新しいバージョンの Outline のソースの `plugins/` にこのプラグインをコピーし、PGroonga を入れたテスト用 DB で Outline のテスト（vitest）を実行します。
+3. **テストする**: 新しいバージョンの Outline のソースの `plugins/` にこのプラグインをコピーし、PGroonga を入れたテスト用 DB で Outline のテスト（vitest）を実行します。Docker 上でこれを行うスクリプトが [.claude/skills/release/scripts/](.claude/skills/release/scripts/) にあります（使い方は同じ場所の `testing.md`）。
 4. **バージョンを上げる**: `OUTLINE_VERSION` を新しいバージョンにし、`LICENSE` をそのバージョンの Outline のものに差し替え、`NOTICE` のバージョンと Change Date を合わせます。README 中のバージョン表記も更新します。
 5. **リリースする**: コミットして push し、`outline-<バージョン>` のタグを push すると、Actions がビルドして Release を作ります。
 
