@@ -532,7 +532,7 @@ export default class PGroongaSearchProvider extends PostgresSearchProvider {
     }
 
     // A query of nothing but OR is a search for the word itself.
-    if (tokens.length && tokens.every((t) => t.type === "or")) {
+    if (tokens.length && !tokens.some((t) => t.type === "term")) {
       tokens.splice(0, tokens.length, {
         type: "term",
         text: "OR",
