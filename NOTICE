@@ -1,0 +1,31 @@
+outline-search-pgroonga
+Copyright (c) 2026 lltcggie
+
+This project is a derivative work of Outline 1.10.1
+(https://github.com/outline/outline), (c) 2026 General Outline, Inc.,
+which is licensed under the Business Source License 1.1. As required by that
+license, this project as a whole is distributed under the same license; its
+full text, including the parameters below, is in the LICENSE file.
+
+  Licensed Work:        Outline 1.10.1
+  Additional Use Grant: You may not use it for a Document Service (see LICENSE)
+  Change Date:          2030-09-09
+  Change License:       Apache License, Version 2.0
+
+Portions derived from Outline:
+
+- plugin/search-pgroonga/server/PGroongaSearchProvider.ts
+    extends PostgresSearchProvider from plugins/search-postgres. The block
+    marked "Kept in step with PostgresSearchProvider.searchForTeam" is copied
+    from it, and buildPGroongaFindOptions and buildSnippet are adapted from its
+    buildFindOptions and snippet logic.
+- plugin/search-pgroonga/server/PGroongaSearchProvider.parity.test.ts
+    ported from plugins/search-postgres/server/PostgresSearchProvider.test.ts.
+- The compiled plugin (release archives search-pgroonga-outline-*.tar.gz,
+  and dist/search-pgroonga/ produced by build.sh)
+    compiled from the above.
+
+The Business Source License is not an Open Source license. "Business Source
+License" is a trademark of MariaDB Corporation Ab. "Outline" is a trademark of
+General Outline, Inc.; this project is not affiliated with or endorsed by
+General Outline, Inc.

@@ -1,0 +1,19 @@
+# Example for the docker-compose.yml from Outline's hosting guide. Adjust the
+# service names, PostgreSQL version and paths to your setup, then save as
+# docker-compose.override.yml next to it (or merge into your compose file).
+services:
+  postgres:
+    # PostgreSQL with PGroonga preinstalled. Keep BOTH the major version and
+    # the base (debian / alpine) of the image you run today: postgres:16 ->
+    # latest-debian-16, postgres:16-alpine -> latest-alpine-16. See the tag
+    # list at https://hub.docker.com/r/groonga/pgroonga/tags
+    image: groonga/pgroonga:latest-debian-16
+
+  outline:
+    environment:
+      SEARCH_PROVIDER: pgroonga
+    volumes:
+      # The compiled plugin, extracted from the release archive for your
+      # Outline version. Outline loads every build/plugins/*/server/index.js
+      # at startup.
+      - ./search-pgroonga:/opt/outline/build/plugins/search-pgroonga:ro

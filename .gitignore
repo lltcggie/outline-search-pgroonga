@@ -1,0 +1,4 @@
+# Built by build.sh, distributed through GitHub Releases.
+/dist/
+/*.tar.gz
+/*.tar.gz.sha256

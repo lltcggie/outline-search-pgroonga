@@ -1,0 +1,105 @@
+# Builds the plugin against Outline and, for tags, publishes it as a release.
+#
+# - push / pull request: build against the version in OUTLINE_VERSION.
+# - manual run: build against any version (e.g. to try a new Outline release
+#   before supporting it). The result is attached to the run as an artifact.
+# - tag "outline-<version>" or "outline-<version>-r<n>": build and publish a
+#   GitHub release. <version> must match OUTLINE_VERSION.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["outline-*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      outline_version:
+        description: "Outline version to build against, e.g. 1.11.0 (default: OUTLINE_VERSION)"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      asset: ${{ steps.package.outputs.asset }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Determine Outline version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.outline_version }}
+        run: |
+          version="${INPUT_VERSION:-$(tr -d '[:space:]' < OUTLINE_VERSION)}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^outline-([0-9]+\.[0-9]+\.[0-9]+)(-r[0-9]+)?$ ]]; then
+              echo "::error::Tag must be outline-<version> or outline-<version>-r<n>, got $GITHUB_REF_NAME"
+              exit 1
+            fi
+            if [[ "${BASH_REMATCH[1]}" != "$version" ]]; then
+              echo "::error::Tag is for Outline ${BASH_REMATCH[1]} but OUTLINE_VERSION is $version"
+              exit 1
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Use the Node.js version that this Outline version is developed with.
+      - name: Fetch Outline's .nvmrc
+        run: >
+          curl -fsSL -o "$RUNNER_TEMP/.nvmrc"
+          "https://raw.githubusercontent.com/outline/outline/v${{ steps.version.outputs.version }}/.nvmrc"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: ${{ runner.temp }}/.nvmrc
+
+      # Outline pins its Yarn version through corepack, which recent Node.js
+      # releases no longer bundle.
+      - name: Enable corepack
+        run: npm install --global corepack && corepack enable
+
+      - name: Build
+        run: ./build.sh "${{ steps.version.outputs.version }}"
+
+      - name: Package
+        id: package
+        run: |
+          asset="search-pgroonga-outline-${{ steps.version.outputs.version }}.tar.gz"
+          tar -czf "$asset" -C dist search-pgroonga
+          sha256sum "$asset" > "$asset.sha256"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: search-pgroonga-outline-${{ steps.version.outputs.version }}
+          path: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.package.outputs.asset }}.sha256
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: search-pgroonga-outline-${{ needs.build.outputs.version }}
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          ASSET: ${{ needs.build.outputs.asset }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$ASSET" "$ASSET.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME (for Outline v$VERSION)" \
+            --notes "Outline v$VERSION 用のビルド済みプラグインです。導入方法は README を参照してください。"

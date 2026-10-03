@@ -1,0 +1,6 @@
+{
+  "id": "search-pgroonga",
+  "name": "PGroonga Search",
+  "priority": 10,
+  "description": "Full-text search powered by PGroonga, with support for Japanese, Chinese and Korean."
+}
