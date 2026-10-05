@@ -1,5 +1,6 @@
 import { QueryTypes } from "sequelize";
 import { DirectionFilter, SortFilter } from "@shared/types";
+import { parser } from "@server/editor";
 import { sequelizeReadOnly } from "@server/storage/database";
 import {
   buildCollection,
@@ -170,6 +171,136 @@ describe("PGroongaSearchProvider", () => {
         { title: "新しい名前", previousTitles: ["旧プロジェクト名"] },
       ]);
       expect(await search("旧プロジェクト")).toEqual(["新しい名前"]);
+    });
+  });
+
+  describe("body", () => {
+    it("should find what was just written, before Outline rewrites text", async () => {
+      const { search, documents } = await setup([
+        { title: "議事録", text: "古い本文" },
+      ]);
+      // What the collaboration server saves while editing: content only, text
+      // is rewritten later.
+      await documents[0].update(
+        { content: parser.parse("新しく書いた本文")?.toJSON() },
+        { hooks: false }
+      );
+      await documents[0].reload();
+      expect(documents[0].text).toBe("古い本文");
+
+      expect(await search("新しく書いた")).toEqual(["議事録"]);
+      expect(await search("古い本文")).toEqual([]);
+    });
+
+    it("should match a word split by formatting", async () => {
+      const { search } = await setup([
+        { title: "書式", text: "これは**太字**です" },
+      ]);
+      expect(await search("は太字で")).toEqual(["書式"]);
+    });
+
+    it("should not match across paragraphs", async () => {
+      const { search } = await setup([
+        { title: "段落", text: "あいう\n\nえおか" },
+      ]);
+      expect(await search("いう")).toEqual(["段落"]);
+      expect(await search("うえ")).toEqual([]);
+    });
+
+    it("should find a link target and a mention", async () => {
+      const { search, documents, user } = await setup([
+        { title: "リンク", text: "[資料](https://example.com/spec-123)" },
+      ]);
+      expect(await search("example.com/spec-123")).toEqual(["リンク"]);
+
+      await documents[0].update(
+        {
+          content: {
+            type: "doc",
+            content: [
+              {
+                type: "paragraph",
+                content: [
+                  { type: "text", text: "担当は" },
+                  {
+                    type: "mention",
+                    attrs: {
+                      type: "user",
+                      label: "山田太郎",
+                      modelId: user.id,
+                      id: "mention-1",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        { hooks: false }
+      );
+      expect(await search("担当は@山田太郎")).toEqual(["リンク"]);
+    });
+
+    it("should not match across list items or table cells", async () => {
+      const { search, documents } = await setup([
+        {
+          title: "一覧",
+          text: "- あいう\n- えおか\n\n| かき | くけ |\n| --- | --- |\n| こさ | しす |",
+        },
+      ]);
+      expect(JSON.stringify(documents[0].content)).toContain(
+        '"type":"table"'
+      );
+      expect(await search("いう")).toEqual(["一覧"]);
+      expect(await search("かき")).toEqual(["一覧"]);
+      expect(await search("うえ")).toEqual([]);
+      expect(await search("きく")).toEqual([]);
+    });
+
+    it("should find an attachment name and an image caption", async () => {
+      const { search, documents } = await setup([{ title: "添付" }]);
+      await documents[0].update(
+        {
+          content: {
+            type: "doc",
+            content: [
+              {
+                type: "attachment",
+                attrs: {
+                  id: "attachment-1",
+                  href: "/api/attachments.redirect?id=attachment-1",
+                  title: "見積書_2026.pdf",
+                  size: 1024,
+                },
+              },
+              {
+                type: "paragraph",
+                content: [
+                  { type: "text", text: "前" },
+                  {
+                    type: "image",
+                    attrs: { src: "/images/diagram.png", alt: "構成図の説明" },
+                  },
+                  { type: "text", text: "後" },
+                ],
+              },
+            ],
+          },
+        },
+        { hooks: false }
+      );
+      expect(await search("見積書")).toEqual(["添付"]);
+      expect(await search("構成図の説明")).toEqual(["添付"]);
+      // The caption is set apart from the text around the image.
+      expect(await search("前構")).toEqual([]);
+    });
+
+    it("should fall back to text for a document without content", async () => {
+      const { search, documents } = await setup([
+        { title: "旧形式", text: "本文だけの文書" },
+      ]);
+      await documents[0].update({ content: null }, { hooks: false });
+      expect(await search("本文だけ")).toEqual(["旧形式"]);
     });
   });
 

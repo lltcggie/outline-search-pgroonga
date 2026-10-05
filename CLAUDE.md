@@ -36,7 +36,9 @@ Outline（Wiki）v1.10.1 用の検索プロバイダープラグイン。PGroong
 - `where` は Sequelize の query generator の `getWhereConditions(where, "Document", Document)`（`findAll` が内部で使うのと同じ呼び出し）で SQL にしている。Sequelize の型定義では query generator が `unknown` なので、ここは型チェックされない。
 - 並び替え（`buildRankedOrder`）は標準の `buildFindOptions` の並び順を SQL で書いたもの。件数は標準の `countResults` と同じ省略（ページが埋まらなければ数えない）をしてから数える。
 
-**インデックス式の一致が必須**: `INDEXED_SQL`（`ARRAY[title::text, text] || COALESCE("previousTitles", '{}')::text[]`）は `sql/install.sql` の `CREATE INDEX` の式と一字一句同じでなければならない（PostgreSQL は式インデックスを同じ式のクエリでしか使わない）。片方を変えたらもう片方も変える。インデックス名 `documents_pgroonga_idx` も `install.sql`・`uninstall.sql`・`indexName` で共通。
+**インデックス式の一致が必須**: `INDEXED_SQL`（`ARRAY[title::text, COALESCE(search_pgroonga_document_text(content), text)] || COALESCE("previousTitles", '{}')::text[]`）は `sql/install.sql` の `CREATE INDEX` の式と一字一句同じでなければならない（PostgreSQL は式インデックスを同じ式のクエリでしか使わない）。片方を変えたらもう片方も変える。インデックス名 `documents_pgroonga_v2_idx` も `install.sql`・`uninstall.sql`・`indexName` で共通。式やインデックスの中身を変えるときは、既存の利用者が古いインデックスのまま動かないよう、インデックス名も変えて README に移行手順を書く（`v2` は本文を `text` から `content` に変えたときのもの。`uninstall.sql` は旧名 `documents_pgroonga_idx` も消す）。
+
+**本文の出どころ**: 本文は `documents.text`（Markdown）ではなく `documents.content`（ProseMirror の JSON）から、`install.sql` の SQL 関数 `search_pgroonga_document_text` で取り出す。Outline は `text` を、文書を閉じたときか最後の編集から 5 分後にしか書き換えないため（`DocumentUpdateTextTask`）、`text` を検索すると直前の編集が見つからない。`content` は共同編集サーバーが数秒〜10 秒ごとに保存する。関数は段落などのインライン内容を区切らずにつなぎ（書式をまたぐ語を 1 語に保つ）、ブロック間は改行で区切り、メンションのラベル、添付ファイル名、画像の代替テキスト（前後を改行で区切る）、リンク先（`$.**.href`）を含める。前提にしているノード名・属性（`text`、`mention` の `attrs.type`・`attrs.label`、`br`、`attachment` の `attrs.title`、`image` の `attrs.alt`、`href`）は Outline の `shared/editor/` のもの。`content` が NULL の文書は `text` を使う。関数の結果を変えたらインデックスの作り直しが要る。
 
 **重み**: 配列要素ごとに title=10、body=1、previousTitles=2（標準の tsvector 重み A/D/C の比率に合わせたもの）。PGroonga は重みのない配列要素を無視するため、`maxPreviousTitles`（20）が過去タイトルの検索上限になる。
 

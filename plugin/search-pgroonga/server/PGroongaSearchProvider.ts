@@ -61,7 +61,7 @@ export default class PGroongaSearchProvider extends PostgresSearchProvider {
   id = "pgroonga";
 
   /** Name of the index created by sql/install.sql. */
-  public static indexName = "documents_pgroonga_idx";
+  public static indexName = "documents_pgroonga_v2_idx";
 
   /**
    * Relative weight of a match in the title, the body and a previous title.
@@ -81,8 +81,12 @@ export default class PGroongaSearchProvider extends PostgresSearchProvider {
    * The indexed expression: [title, body, ...previous titles]. This must be
    * written exactly as in sql/install.sql, PostgreSQL only uses an expression
    * index when the query repeats the expression it was built from.
+   *
+   * The body comes from content, which the editor saves every few seconds,
+   * rather than text, which Outline only rewrites once the document is closed
+   * or has not been edited for 5 minutes.
    */
-  private static readonly INDEXED_SQL = `ARRAY[title::text, text] || COALESCE("previousTitles", '{}')::text[]`;
+  private static readonly INDEXED_SQL = `ARRAY[title::text, COALESCE(search_pgroonga_document_text(content), text)] || COALESCE("previousTitles", '{}')::text[]`;
 
   /**
    * Finds every matching document of the team and its score using only the

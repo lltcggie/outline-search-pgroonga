@@ -37,6 +37,7 @@ scratchpad に `git clone --filter=blob:none https://github.com/outline/outline.
 
 - `plugins/search-postgres/`（標準プロバイダーとそのテスト）と `server/utils/BaseSearchProvider.ts`
 - プラグインが import している Outline のモジュールすべて（`plugin/search-pgroonga/server/*.ts` の `@server/`・`@shared/` の import 先）
+- `shared/editor/`（`install.sql` の本文抽出関数が前提にしている ProseMirror のノード名・属性: `text`、`mention` の `attrs.type`・`attrs.label`、`br`、`attachment` の `attrs.title`、`image` の `attrs.alt`、リンクの `attrs.href`）と、`documents.content` を保存する `server/commands/documentCollaborativeUpdater.ts`
 
 差分ごとに、プラグイン側の対応箇所へ追随させる（地図は [NOTICE](../../../NOTICE) の由来一覧と CLAUDE.md のアーキテクチャ節）。特に見る箇所は、`searchForTeam` 内の「Kept in step with…」ブロック、`buildRankedOrder`、`buildSnippet`、`PGroongaSearchProvider.parity.test.ts`。CLAUDE.md の不変条件（MATERIALIZED CTE の構造、`INDEXED_SQL` と `install.sql` の式の一致）は保つ。
 
